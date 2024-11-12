@@ -4,17 +4,79 @@
 #include <unistd.h>
 #include <string.h>
 #include <arpa/inet.h>
-#include <sys/epoll.h>
-#include <fcntl.h>
-#include <errno.h>
 
 #include "config.h"
 
-// Make socket non-blocking
-void set_nonblocking(int sock) {
-    int flags = fcntl(sock, F_GETFL, 0);
-    fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+enum ParseState {
+    METHOD,
+    PATH,
+    VERSION,
+    DONE
+};
+
+struct HttpRequest {
+    ParseState state;
+    std::string method;
+    std::string path;
+    std::string version;
+};
+
+int parse_http_request(HttpRequest* req, const char* buf) {
+    req->state = ParseState::METHOD;
+    std::string token;
+
+
+    for (int i=0; req->state != ParseState::DONE && buf[i] != '\0'; i++) {
+        // collect token until delimiter hit
+        if (buf[i] != ' ' && buf[i] != '\r' && buf[i] != '\n') {
+            token += buf[i];
+            continue;
+        }
+
+        switch (req->state) {
+            case ParseState::METHOD:
+                req->method = token;
+                req->state = ParseState::PATH;
+                break;
+            case ParseState::PATH:
+                req->path = token;
+                req->state = ParseState::VERSION;
+                break;
+            case ParseState::VERSION:
+                req->version = token;
+                req->state = ParseState::DONE;
+                break;
+            case ParseState::DONE:
+                break;
+        }
+        token.clear();
+    }
+
+    return 0;
 }
+
+int process_buffer(const char* buf) {
+    std::cout << "PROCESSING\n----------" << std::endl;
+    std::cout << buf << std::endl;
+    std::cout << "----------\nEND PROCESSING" << std::endl;
+
+    HttpRequest req;
+    if (0 != parse_http_request(&req, buf)) {
+        std::cerr << "error parsing request" << std::endl;
+        return 1;
+    }
+
+    std::cout << "\nPROCESSED\n----------" << std::endl;
+
+    std::cout << "method: " << req.method << std::endl;
+    std::cout << "path: " << req.path << std::endl;
+    std::cout << "version: " << req.version << std::endl;
+
+    std::cout << "----------\nEND PROCESSED" << std::endl;
+
+    return 0;
+}
+
 
 int main() {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -40,88 +102,57 @@ int main() {
         return -1;
     }
 
-    if (listen(server_fd, SOMAXCONN) < 0) {
+    if (listen(server_fd, 3) < 0) {
         std::cerr << "Listen failed" << std::endl;
         return -1;
     }
 
-    // Create epoll instance
-    int epoll_fd = epoll_create1(0);
-    if (epoll_fd == -1) {
-        std::cerr << "Epoll creation failed" << std::endl;
-        return -1;
-    }
-
-    // Make server socket non-blocking
-    set_nonblocking(server_fd);
-
-    // Add server socket to epoll
-    struct epoll_event event;
-    event.events = EPOLLIN;
-    event.data.fd = server_fd;
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &event) == -1) {
-        std::cerr << "Failed to add server socket to epoll" << std::endl;
-        return -1;
-    }
-
-    std::cout << "Server listening on port " << SERVER_PORT << std::endl;
-
-    // Event loop
-    const int MAX_EVENTS = 10;
-    struct epoll_event events[MAX_EVENTS];
-    char buffer[1024];
+    std::cout << "Server listening on port " << SERVER_PORT << "..." << std::endl;
 
     while (true) {
-        int num_events = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        int new_socket;
+        int addrlen = sizeof(address);
+        new_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen);
         
-        for (int i = 0; i < num_events; i++) {
-            if (events[i].data.fd == server_fd) {
-                // Handle new connection
-                while (true) {  // Accept all pending connections
-                    int client_fd = accept(server_fd, nullptr, nullptr);
-                    if (client_fd == -1) {
-                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            // No more connections to accept
-                            break;
-                        }
-                        std::cerr << "Accept failed" << std::endl;
-                        break;
-                    }
-
-                    // Make client socket non-blocking
-                    set_nonblocking(client_fd);
-
-                    // Add client to epoll
-                    event.events = EPOLLIN | EPOLLET;  // Edge-triggered mode
-                    event.data.fd = client_fd;
-                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &event) == -1) {
-                        std::cerr << "Failed to add client to epoll" << std::endl;
-                        close(client_fd);
-                        continue;
-                    }
-                    
-                    std::cout << "New client connected: " << client_fd << std::endl;
-                }
-            } else {
-                // Handle client data
-                int client_fd = events[i].data.fd;
-                memset(buffer, 0, sizeof(buffer));
-                
-                int valread = read(client_fd, buffer, sizeof(buffer));
-                if (valread <= 0) {
-                    // Connection closed or error
-                    std::cout << "Client disconnected: " << client_fd << std::endl;
-                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, client_fd, nullptr);
-                    close(client_fd);
-                } else {
-                    std::cout << "Received from client " << client_fd << ": " << buffer;
-                    send(client_fd, buffer, valread, 0);
-                }
-            }
+        const int buffer_size = 1024;  // TODO: experiment with smaller buffers
+        char buffer[buffer_size] = {0};
+        int valread = read(new_socket, buffer, buffer_size);
+        if (valread < 0) {
+            std::cerr << "Error reading from socket" << std::endl;
+            close(new_socket);
+            continue;
         }
+        if (valread == 0) {
+            // Client closed connection
+            std::cout << "Client disconnected" << std::endl;
+            close(new_socket);
+            continue;
+        }
+
+        // std::cout << "Received (processing): " << buffer << std::endl;
+
+        int ret = process_buffer(buffer);
+
+        const char *success =   "HTTP/1.0 200 OK\r\n"
+                                "Content-Type: text/plain\r\n"
+                                "Content-Length: 8\r\n"
+                                "\r\n"
+                                "success\n";
+
+        const char *failure =   "HTTP/1.0 200 OK\r\n"
+                                "Content-Type: text/plain\r\n"
+                                "Content-Length: 8\r\n"
+                                "\r\n"
+                                "failure\n";
+
+        if (ret == 0) {
+            send(new_socket, success, strlen(success), 0);
+        } else {
+            send(new_socket, failure, strlen(failure), 0);
+        }
+        
+        close(new_socket);
     }
 
-    close(server_fd);
-    close(epoll_fd);
     return 0;
 }
