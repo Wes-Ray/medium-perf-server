@@ -86,28 +86,38 @@ int parse_http_request(HttpRequest* req, const char* buf) {
     return 0;
 }
 
-int process_buffer(const char* buf) {
+int send_response(HttpRequest* req, int socket) {
+    std::cout << "SENDING RESPONSE" << std::endl;
+
+    const char *success =   "HTTP/1.0 200 OK\r\n"
+                            "Content-Type: text/plain\r\n"
+                            "Content-Length: 8\r\n"
+                            "\r\n"
+                            "success\n";
+
+    send(socket, success, strlen(success), 0);
+
+    return 0;
+}
+
+int process_buffer(const char* buf, HttpRequest* req) {
     std::cout << "PROCESSING\n----------" << std::endl;
     std::cout << buf << std::endl;
     std::cout << "----------\nEND PROCESSING" << std::endl;
 
-    HttpRequest req;
-    if (0 != parse_http_request(&req, buf)) {
+    if (0 != parse_http_request(req, buf)) {
         std::cerr << "error parsing request" << std::endl;
         return 1;
     }
 
     std::cout << "\nPROCESSED\n----------" << std::endl;
-
-    std::cout << "method: " << req.method << std::endl;
-    std::cout << "path: " << req.path << std::endl;
-    std::cout << "version: " << req.version << std::endl;
-    std::cout << "Header Lines... [" << req.header_lines.size() << "]" << std::endl;
-    for (const auto& pair : req.header_lines) {
-        std::cout << pair.first << ": " << pair.second << std::endl;
+    std::cout << "method: " << req->method << std::endl;
+    std::cout << "path: " << req->path << std::endl;
+    std::cout << "version: " << req->version << std::endl;
+    std::cout << "Header Lines... [" << req->header_lines.size() << "]" << std::endl;
+    for (const auto& pair : req->header_lines) {
+        std::cout << "\t" << pair.first << ": " << pair.second << std::endl;
     }
-
-
     std::cout << "----------\nEND PROCESSED" << std::endl;
 
     return 0;
@@ -167,26 +177,18 @@ int main() {
 
         // std::cout << "Received (processing): " << buffer << std::endl;
 
-        int ret = process_buffer(buffer);
-
-        const char *success =   "HTTP/1.0 200 OK\r\n"
-                                "Content-Type: text/plain\r\n"
-                                "Content-Length: 8\r\n"
-                                "\r\n"
-                                "success\n";
-
-        const char *failure =   "HTTP/1.0 200 OK\r\n"
-                                "Content-Type: text/plain\r\n"
-                                "Content-Length: 8\r\n"
-                                "\r\n"
-                                "failure\n";
-
-        if (ret == 0) {
-            send(new_socket, success, strlen(success), 0);
-        } else {
-            send(new_socket, failure, strlen(failure), 0);
+        HttpRequest req;
+        int ret = process_buffer(buffer, &req);
+        if (ret != 0) {
+            std::cerr << "error processing buffer" << std::endl;
+            return 1;
         }
-        
+
+        if (0 != send_response(&req, new_socket)) {
+            std::cerr << "error sending the response" << std::endl;
+            return 1;
+        }
+
         close(new_socket);
     }
 
