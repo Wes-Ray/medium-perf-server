@@ -3,6 +3,7 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <string.h>
+#include <map>
 #include <arpa/inet.h>
 
 #include "config.h"
@@ -11,45 +12,59 @@ enum ParseState {
     METHOD,
     PATH,
     VERSION,
-    DONE
+    HEADER_LINES,
+    DONE,
 };
 
 struct HttpRequest {
-    ParseState state;
+    ParseState  state;
     std::string method;
     std::string path;
     std::string version;
+    std::map<std::string, std::string> header_lines;
 };
 
 int parse_http_request(HttpRequest* req, const char* buf) {
     req->state = ParseState::METHOD;
     std::string token;
 
+    for (int i = 0; buf[i] != '\0'; i++) {
 
-    for (int i=0; req->state != ParseState::DONE && buf[i] != '\0'; i++) {
-        // collect token until delimiter hit
-        if (buf[i] != ' ' && buf[i] != '\r' && buf[i] != '\n') {
-            token += buf[i];
+        if (buf[i] == '\r') {
             continue;
         }
 
-        switch (req->state) {
-            case ParseState::METHOD:
-                req->method = token;
-                req->state = ParseState::PATH;
-                break;
-            case ParseState::PATH:
-                req->path = token;
-                req->state = ParseState::VERSION;
-                break;
-            case ParseState::VERSION:
-                req->version = token;
-                req->state = ParseState::DONE;
-                break;
-            case ParseState::DONE:
-                break;
+        // always use \n as delimiter, only use space as delimter when not in the header_lines state
+        if (buf[i] == '\n' || (buf[i] == ' ' && req->state != ParseState::HEADER_LINES)) {
+            switch (req->state) {
+                case ParseState::METHOD:
+                    req->method = token;
+                    req->state = ParseState::PATH;
+                    break;
+                case ParseState::PATH:
+                    req->path = token;
+                    req->state = ParseState::VERSION;
+                    break;
+                case ParseState::VERSION:
+                    req->version = token;
+                    req->state = ParseState::HEADER_LINES;
+                    break;
+                case ParseState::HEADER_LINES:
+                    if (!token.empty()) {
+                        std::cout << "Header: " << token << std::endl;
+
+                    } else if (buf[i] == '\n') {
+                        req->state = ParseState::DONE;
+                    }
+                    break;
+                case ParseState::DONE:
+                    break;
+            }
+            token.clear();
+            continue;
         }
-        token.clear();
+
+        token += buf[i];
     }
 
     return 0;
