@@ -38,7 +38,6 @@ int parse_http_request(HttpRequest* req, const char* buf) {
             continue;
         }
 
-        // always use \n as delimiter, only use space as delimter when not in the header_lines state
         if (buf[i] == '\n' || buf[i] == ' ') {
             switch (req->state) {
                 case ParseState::METHOD:
@@ -56,7 +55,9 @@ int parse_http_request(HttpRequest* req, const char* buf) {
                 case ParseState::HEADER_KEY:
                     if (!token.empty()) {
                         req->current_header_key = token;
+                        // remove : at end of key
                         req->current_header_key.pop_back();
+                        // lowercase
                         std::transform( req->current_header_key.begin(), 
                                         req->current_header_key.end(), 
                                         req->current_header_key.begin(), 
@@ -67,12 +68,8 @@ int parse_http_request(HttpRequest* req, const char* buf) {
                     }
                     break;
                 case ParseState::HEADER_VALUE:
-                    if (!token.empty()) {
-                        req->header_lines[req->current_header_key] = token;
-                        req->state = ParseState::HEADER_KEY;
-                    } else if (buf[i] == '\n') {
-                        req->state = ParseState::DONE;
-                    }
+                    req->header_lines[req->current_header_key] = token;
+                    req->state = ParseState::HEADER_KEY;
                     break;
                 case ParseState::DONE:
                     break;
