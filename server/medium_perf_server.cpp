@@ -3,6 +3,7 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <string.h>
+#include <algorithm>
 #include <map>
 #include <arpa/inet.h>
 
@@ -12,7 +13,8 @@ enum ParseState {
     METHOD,
     PATH,
     VERSION,
-    HEADER_LINES,
+    HEADER_KEY,
+    HEADER_VALUE,
     DONE,
 };
 
@@ -21,6 +23,8 @@ struct HttpRequest {
     std::string method;
     std::string path;
     std::string version;
+
+    std::string current_header_key;
     std::map<std::string, std::string> header_lines;
 };
 
@@ -35,7 +39,7 @@ int parse_http_request(HttpRequest* req, const char* buf) {
         }
 
         // always use \n as delimiter, only use space as delimter when not in the header_lines state
-        if (buf[i] == '\n' || (buf[i] == ' ' && req->state != ParseState::HEADER_LINES)) {
+        if (buf[i] == '\n' || buf[i] == ' ') {
             switch (req->state) {
                 case ParseState::METHOD:
                     req->method = token;
@@ -47,12 +51,25 @@ int parse_http_request(HttpRequest* req, const char* buf) {
                     break;
                 case ParseState::VERSION:
                     req->version = token;
-                    req->state = ParseState::HEADER_LINES;
+                    req->state = ParseState::HEADER_KEY;
                     break;
-                case ParseState::HEADER_LINES:
+                case ParseState::HEADER_KEY:
                     if (!token.empty()) {
-                        std::cout << "Header: " << token << std::endl;
-
+                        req->current_header_key = token;
+                        req->current_header_key.pop_back();
+                        std::transform( req->current_header_key.begin(), 
+                                        req->current_header_key.end(), 
+                                        req->current_header_key.begin(), 
+                                        ::tolower);
+                        req->state = ParseState::HEADER_VALUE;
+                    } else if (buf[i] == '\n') {
+                        req->state = ParseState::DONE;
+                    }
+                    break;
+                case ParseState::HEADER_VALUE:
+                    if (!token.empty()) {
+                        req->header_lines[req->current_header_key] = token;
+                        req->state = ParseState::HEADER_KEY;
                     } else if (buf[i] == '\n') {
                         req->state = ParseState::DONE;
                     }
@@ -66,6 +83,8 @@ int parse_http_request(HttpRequest* req, const char* buf) {
 
         token += buf[i];
     }
+
+    req->current_header_key.clear();
 
     return 0;
 }
@@ -86,6 +105,11 @@ int process_buffer(const char* buf) {
     std::cout << "method: " << req.method << std::endl;
     std::cout << "path: " << req.path << std::endl;
     std::cout << "version: " << req.version << std::endl;
+    std::cout << "Header Lines... [" << req.header_lines.size() << "]" << std::endl;
+    for (const auto& pair : req.header_lines) {
+        std::cout << pair.first << ": " << pair.second << std::endl;
+    }
+
 
     std::cout << "----------\nEND PROCESSED" << std::endl;
 
