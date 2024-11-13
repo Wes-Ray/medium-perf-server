@@ -7,11 +7,16 @@
 #include <map>
 #include <arpa/inet.h>
 #include <sys/sendfile.h>
+#include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <filesystem>
+#include <fstream>
 
 #include "config.h"
+
+// curl -X POST -F "file=@file.upload" http://localhost:8080/upload
+// curl localhost:8080/download --output download.file
 
 namespace fs = std::filesystem;
 fs::path project_root = "/home/dev/dev/medium-performance-server";
@@ -95,61 +100,133 @@ int parse_http_request(HttpRequest* req, const char* buf) {
     return 0;
 }
 
-int send_response(HttpRequest* req, int socket) {
+int upload_file_from_client(HttpRequest* req, int socket) {
+
+    auto content_type_it = req->header_lines.find("content-type");
+    if (content_type_it == req->header_lines.end()) {
+        std::string response = "HTTP/1.0 400 Bad Request\r\n\r\n";
+        send(socket, response.c_str(), response.length(), 0);
+        return 1;
+    }
+
+    std::string boundary;
+    size_t bound_pos = content_type_it->second.find("boundary=");
+    if (bound_pos != std::string::npos) {
+        boundary = content_type_it->second.substr(bound_pos + 9);
+    }
+
+    char buffer[4096];
+    std::string file_content;
+    while (true) {
+        ssize_t bytes = recv(socket, buffer, sizeof(buffer), 0);
+        if (bytes <= 0) {
+            break;
+        }
+        file_content.append(buffer, bytes);
+    }
+
+    size_t file_start = file_content.find("\r\n\r\n");
+    if (file_start != std::string::npos) {
+        file_start += 4;  // skip \r\n\r\n
+
+        size_t file_end = file_content.find(boundary, file_start);
+        if (file_end != std::string::npos) {
+            file_end -= 4;  // \r\n--
+
+            std::string file_data = file_content.substr(file_start, file_end - file_start);
+
+            std::string filename = upload_dir / "uploaded.file";
+            
+            std::ofstream outfile(filename, std::ios::binary);
+            if (outfile.is_open()) {
+                outfile.write(file_data.c_str(), file_data.size());
+                outfile.close();
+
+                std::string response = 
+                    "HTTP/1.0 200 OK\r\n"
+                    "Content-Type: text/plain\r\n"
+                    "Content-Length: 15\r\n"
+                    "\r\n"
+                    "Upload Success\n";
+                send(socket, response.c_str(), response.length(), 0);
+            } else {
+                std::string response = "HTTP/1.0 500 Internal Server Error\r\n\r\n";
+                send(socket, response.c_str(), response.length(), 0);
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+int download_file_to_client(HttpRequest* req, int socket) {
+
+    // TODO: just using a file directly for now... could specify a file 
+
+    fs::path down_file = file_dir / "Wireshark-4.4.1-x64.exe";
+
+    int fd = open(down_file.c_str(), O_RDONLY);
+    if (fd < 0) {
+        std::cerr << "Failed to open file" << std::endl;
+        return 1;
+    }
+
+    struct stat stat_buf;
+    int ret = stat(down_file.c_str(), &stat_buf);
+    if (ret != 0) {
+        std::cerr << "Failed to get file size" << std::endl;
+        return 1;
+    } 
+    off_t file_size = stat_buf.st_size;
+    // const size_t file_size = 100 * 1024 * 1024;  //10MB
+
+    std::string headers =
+            "HTTP/1.0 200 OK\r\n"
+            "Content-Type: application/octet-stream\r\n"
+            "Content-Length: " + std::to_string(file_size) + "\r\n"
+            "\r\n";
+
+    send(socket, headers.c_str(), headers.length(), 0);
+
+    off_t offset = 0;
+    ssize_t sent = sendfile(socket, fd, &offset, file_size);
+    if (sent < 0) {
+        std::cerr << "sendfile failed: " << strerror(errno) << std::endl;
+        close (fd);
+        return 1;
+    }
+
+    close(fd);
+
+    return 0;
+}
+
+int process_request(HttpRequest* req, int socket) {
     std::cout << "SENDING RESPONSE" << std::endl;
 
-    //
-    // Upload
-    //
     if (req->path == "/upload") {
         std::cout << "Uploading..." << std::endl;
 
-        std::cout << "Uploading..." << std::endl;
-        std::string response = 
-            "HTTP/1.0 200 OK\r\n"
-            "Content-Type: text/plain\r\n"
-            "Content-Length: 7\r\n"
-            "\r\n"
-            "Upload\n";
-        send(socket, response.c_str(), response.length(), 0);
-    }
-    //
-    // Download
-    //
-    else if (req->path == "/download") {
+        int ret = upload_file_from_client(req, socket);
+        if (ret != 0) {
+            return ret;
+        }
 
+        std::cout << "Upload complete" << std::endl;
+    } 
+
+    else if (req->path == "/download") {
         std::cout << "Downloading..." << std::endl;
 
-        const size_t file_size = 100 * 1024 * 1024;  //10MB
-
-        std::string headers =
-                "HTTP/1.0 200 OK\r\n"
-                "Content-Type: application/octet-stream\r\n"
-                "Content-Length: " + std::to_string(file_size) + "\r\n"
-                "\r\n";
-
-        send(socket, headers.c_str(), headers.length(), 0);
-
-        // TODO: just using a file directly for now... could specify a file 
-        int fd = open((file_dir / "Wireshark-4.4.1-x64.exe").c_str(), O_RDONLY);
-        if (fd < 0) {
-            std::cerr << "Failed to open file" << std::endl;
-            return 1;
+        int ret = download_file_to_client(req, socket);
+        if (ret != 0) {
+            return ret;
         }
 
-        off_t offset = 0;
-        ssize_t sent = sendfile(socket, fd, &offset, file_size);
-        if (sent < 0) {
-            std::cerr << "sendfile failed: " << strerror(errno) << std::endl;
-            close (fd);
-            return 1;
-        }
+        std::cout << "Download complete" << std::endl;
+    } 
 
-        close(fd);
-    }
-    //
-    // Unsupported path
-    //
     else {
         std::cout << "Bad Path" << std::endl;
         std::string response = 
@@ -222,6 +299,19 @@ int main() {
         int new_socket;
         int addrlen = sizeof(address);
         new_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen);
+        if (new_socket < 0) {
+           std::cerr << "Accept failed" << std::endl;
+            continue;
+        }
+
+
+        struct timeval timeout;
+        timeout.tv_sec = 3;  // seconds timeout
+        timeout.tv_usec = 0;
+        if (setsockopt(new_socket, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout)) < 0) {
+            std::cerr << "Setting timeout failed" << std::endl;
+            return -1;
+        }
         
         const int buffer_size = 1024;  // TODO: experiment with smaller buffers
         char buffer[buffer_size] = {0};
@@ -247,7 +337,7 @@ int main() {
             return 1;
         }
 
-        if (0 != send_response(&req, new_socket)) {
+        if (0 != process_request(&req, new_socket)) {
             std::cerr << "error sending the response" << std::endl;
             return 1;
         }
