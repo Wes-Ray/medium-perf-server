@@ -6,8 +6,17 @@
 #include <algorithm>
 #include <map>
 #include <arpa/inet.h>
+#include <sys/sendfile.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <filesystem>
 
 #include "config.h"
+
+namespace fs = std::filesystem;
+fs::path project_root = "/home/dev/dev/medium-performance-server";
+fs::path file_dir = project_root / "files";
+fs::path upload_dir = project_root / "upload";
 
 enum ParseState {
     METHOD,
@@ -89,13 +98,68 @@ int parse_http_request(HttpRequest* req, const char* buf) {
 int send_response(HttpRequest* req, int socket) {
     std::cout << "SENDING RESPONSE" << std::endl;
 
-    const char *success =   "HTTP/1.0 200 OK\r\n"
-                            "Content-Type: text/plain\r\n"
-                            "Content-Length: 8\r\n"
-                            "\r\n"
-                            "success\n";
+    //
+    // Upload
+    //
+    if (req->path == "/upload") {
+        std::cout << "Uploading..." << std::endl;
 
-    send(socket, success, strlen(success), 0);
+        std::cout << "Uploading..." << std::endl;
+        std::string response = 
+            "HTTP/1.0 200 OK\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: 7\r\n"
+            "\r\n"
+            "Upload\n";
+        send(socket, response.c_str(), response.length(), 0);
+    }
+    //
+    // Download
+    //
+    else if (req->path == "/download") {
+
+        std::cout << "Downloading..." << std::endl;
+
+        const size_t file_size = 100 * 1024 * 1024;  //10MB
+
+        std::string headers =
+                "HTTP/1.0 200 OK\r\n"
+                "Content-Type: application/octet-stream\r\n"
+                "Content-Length: " + std::to_string(file_size) + "\r\n"
+                "\r\n";
+
+        send(socket, headers.c_str(), headers.length(), 0);
+
+        // TODO: just using a file directly for now... could specify a file 
+        int fd = open((file_dir / "Wireshark-4.4.1-x64.exe").c_str(), O_RDONLY);
+        if (fd < 0) {
+            std::cerr << "Failed to open file" << std::endl;
+            return 1;
+        }
+
+        off_t offset = 0;
+        ssize_t sent = sendfile(socket, fd, &offset, file_size);
+        if (sent < 0) {
+            std::cerr << "sendfile failed: " << strerror(errno) << std::endl;
+            close (fd);
+            return 1;
+        }
+
+        close(fd);
+    }
+    //
+    // Unsupported path
+    //
+    else {
+        std::cout << "Bad Path" << std::endl;
+        std::string response = 
+            "HTTP/1.0 404 Not Found\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: 9\r\n"
+            "\r\n"
+            "Bad Path\n";
+        send(socket, response.c_str(), response.length(), 0);
+    }
 
     return 0;
 }
@@ -122,7 +186,6 @@ int process_buffer(const char* buf, HttpRequest* req) {
 
     return 0;
 }
-
 
 int main() {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);

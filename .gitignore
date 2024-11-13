@@ -1,2 +1,5 @@
 bin/
 settings.json
+*.upload
+*.file
+*.exe
