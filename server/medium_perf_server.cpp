@@ -5,7 +5,6 @@
 #include <string.h>
 #include <algorithm>
 #include <map>
-#include <arpa/inet.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <fcntl.h>
