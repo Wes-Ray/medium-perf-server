@@ -120,7 +120,7 @@ int upload_file_from_client(HttpRequest* req, int socket) {
         boundary = content_type_it->second.substr(bound_pos + 9);
     }
 
-    char buffer[4096];
+    char buffer[MAX_BUFFER_SIZE];
     std::string file_content;
     while (true) {
         ssize_t bytes = recv(socket, buffer, sizeof(buffer), 0);
@@ -269,8 +269,12 @@ int process_buffer(const char* buf, HttpRequest* req) {
     return 0;
 }
 
-std::string read_from_socket(int fd) {
-    std::string data;
+int read_from_socket(int fd, std::string* data) {
+    if (!data) {
+        return 1; // Invalid parameter
+    }
+    
+    data->clear();
     char buffer[MAX_BUFFER_SIZE];
     
     while (true) {
@@ -281,16 +285,18 @@ std::string read_from_socket(int fd) {
                 break;
             }
             // Real error occurred
-            throw std::runtime_error("Read error");
+            return 1;
         }
         if (bytes_read == 0) {
             // Connection closed
-            throw std::runtime_error("Connection closed");
+            return 1;
         }
-        data.append(buffer, bytes_read);
+        data->append(buffer, bytes_read);
     }
-    return data;
+    
+    return 0;
 }
+
 
 int main() {
     int server_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -374,19 +380,18 @@ int main() {
                 }
             } else {
                 // Handle client requests
-                try {
-                    std::string data = read_from_socket(events[n].data.fd);
-                    if (!data.empty()) {
-                        HttpRequest req;
-                        if (0 == process_buffer(data.c_str(), &req)) {
-                            process_request(&req, events[n].data.fd);
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    // Handle errors or closed connections
+                std::string data;
+                if (read_from_socket(events[n].data.fd, &data) != 0) {
                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, events[n].data.fd, nullptr);
                     close(events[n].data.fd);
                     continue;
+                }
+
+                if (!data.empty()) {
+                    HttpRequest req;
+                    if (0 == process_buffer(data.c_str(), &req)) {
+                        process_request(&req, events[n].data.fd);
+                    }
                 }
                 
                 // Close the connection after processing
