@@ -14,7 +14,7 @@
 #include <fstream>
 #include <sys/epoll.h>
 
-#include "config.h"
+#define SERVER_PORT 8080
 
 // curl -X POST -F "file=@file.upload" http://localhost:8080/upload
 // curl localhost:8080/download --output download.file
