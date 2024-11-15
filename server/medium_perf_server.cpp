@@ -13,6 +13,8 @@
 #include <fstream>
 #include <sys/epoll.h>
 
+#include "json.h"
+
 #define SERVER_PORT 8080
 
 // curl -X POST -F "file=@file.upload" http://localhost:8080/upload
@@ -298,6 +300,28 @@ int read_from_socket(int fd, std::string* data) {
 
 
 int main() {
+
+    fs::path test_json = file_dir / "test.json";
+
+    int fd = open(test_json.c_str(), O_RDONLY);
+    if (fd < 0) {
+        std::cout << "Failed to open test file" << std::endl;
+        return 1;
+    }
+
+
+    if (0 != parse_json(fd)) {
+        std::cout << "parse_json() failed" << std::endl;
+        return 1;
+    }
+
+    close(fd);
+
+    //
+    // temp
+    //
+    return 0;
+
     int server_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
     if (server_fd < 0) {
         std::cerr << "Socket creation failed" << std::endl;
