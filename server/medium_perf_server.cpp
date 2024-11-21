@@ -5,13 +5,13 @@
 #include <string.h>
 #include <algorithm>
 #include <map>
-#include <arpa/inet.h>
 #include <sys/sendfile.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <filesystem>
 #include <fstream>
+#include <sys/epoll.h>
 #include <sys/epoll.h>
 
 #define SERVER_PORT 8080
@@ -21,9 +21,13 @@
 // curl localhost:8080/download --output download.file
 
 namespace fs = std::filesystem;
-fs::path project_root = "/home/dev/dev/medium-performance-server";
+// fs::path project_root = "/home/dev/dev/medium-performance-server";
+fs::path project_root = "/home/wes/dev/medium-perf-server";
 fs::path file_dir = project_root / "files";
 fs::path upload_dir = project_root / "upload";
+
+const int MAX_EVENTS = 10;
+const int MAX_BUFFER_SIZE = 4096;
 
 enum ParseState {
     METHOD,
@@ -117,7 +121,7 @@ int upload_file_from_client(HttpRequest* req, int socket) {
         boundary = content_type_it->second.substr(bound_pos + 9);
     }
 
-    char buffer[4096];
+    char buffer[MAX_BUFFER_SIZE];
     std::string file_content;
     while (true) {
         ssize_t bytes = recv(socket, buffer, sizeof(buffer), 0);
@@ -167,7 +171,7 @@ int download_file_to_client(HttpRequest* req, int socket) {
 
     // TODO: just using a file directly for now... could specify a file 
 
-    fs::path down_file = file_dir / "Wireshark-4.4.1-x64.exe";
+    fs::path down_file = file_dir / "download-file.exe";
 
     int fd = open(down_file.c_str(), O_RDONLY);
     if (fd < 0) {
@@ -267,6 +271,35 @@ int process_buffer(const char* buf, HttpRequest* req) {
     return 0;
 }
 
+int read_from_socket(int fd, std::string* data) {
+    if (!data) {
+        return 1; // Invalid parameter
+    }
+    
+    data->clear();
+    char buffer[MAX_BUFFER_SIZE];
+    
+    while (true) {
+        ssize_t bytes_read = read(fd, buffer, sizeof(buffer));
+        if (bytes_read < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // No more data available right now
+                break;
+            }
+            // Real error occurred
+            return 1;
+        }
+        if (bytes_read == 0) {
+            // Connection closed
+            return 1;
+        }
+        data->append(buffer, bytes_read);
+    }
+    
+    return 0;
+}
+
+
 int main() {
     int server_fd, client_fd, epoll_fd;
     struct sockaddr_in address;
@@ -295,60 +328,85 @@ int main() {
         return -1;
     }
 
-    if (listen(server_fd, 3) < 0) {
+    if (listen(server_fd, SOMAXCONN) < 0) {
         std::cerr << "Listen failed" << std::endl;
+        return -1;
+    }
+
+    // Create epoll instance
+    int epoll_fd = epoll_create1(0);
+    if (epoll_fd < 0) {
+        std::cerr << "Epoll creation failed" << std::endl;
+        return -1;
+    }
+
+    // Add server socket to epoll
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLET; // Edge-triggered mode
+    ev.data.fd = server_fd;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, server_fd, &ev) < 0) {
+        std::cerr << "Failed to add server socket to epoll" << std::endl;
         return -1;
     }
 
     std::cout << "Server listening on port " << SERVER_PORT << "..." << std::endl;
 
+    // Event loop
+    struct epoll_event events[MAX_EVENTS];
     while (true) {
-        int new_socket;
-        int addrlen = sizeof(address);
-        new_socket = accept(server_fd, (struct sockaddr*)&address, (socklen_t*)&addrlen);
-        if (new_socket < 0) {
-           std::cerr << "Accept failed" << std::endl;
+        int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        if (nfds < 0) {
+            std::cerr << "Epoll wait failed" << std::endl;
             continue;
         }
 
+        for (int n = 0; n < nfds; ++n) {
+            if (events[n].data.fd == server_fd) {
+                // Handle new connections
+                while (true) {
+                    int client_fd = accept4(server_fd, nullptr, nullptr, SOCK_NONBLOCK);
+                    if (client_fd < 0) {
+                        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                            // No more new connections
+                            break;
+                        }
+                        std::cerr << "Accept failed" << std::endl;
+                        break;
+                    }
 
-        struct timeval timeout;
-        timeout.tv_sec = 3;  // seconds timeout
-        timeout.tv_usec = 0;
-        if (setsockopt(new_socket, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeout, sizeof(timeout)) < 0) {
-            std::cerr << "Setting timeout failed" << std::endl;
-            return -1;
-        }
-        
-        const int buffer_size = 1024;  // TODO: experiment with smaller buffers
-        char buffer[buffer_size] = {0};
-        int valread = read(new_socket, buffer, buffer_size);
-        if (valread < 0) {
-            std::cerr << "Error reading from socket" << std::endl;
-            close(new_socket);
-            continue;
-        }
-        if (valread == 0) {
-            // Client closed connection
-            std::cout << "Client disconnected" << std::endl;
-            close(new_socket);
-            continue;
-        }
+                    // Add new client to epoll
+                    struct epoll_event client_ev;
+                    client_ev.events = EPOLLIN | EPOLLET;
+                    client_ev.data.fd = client_fd;
+                    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, client_fd, &client_ev) < 0) {
+                        std::cerr << "Failed to add client to epoll" << std::endl;
+                        close(client_fd);
+                        continue;
+                    }
+                }
+            } else {
+                // Handle client requests
+                std::string data;
+                if (read_from_socket(events[n].data.fd, &data) != 0) {
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, events[n].data.fd, nullptr);
+                    close(events[n].data.fd);
+                    continue;
+                }
 
-        HttpRequest req;
-        int ret = process_buffer(buffer, &req);
-        if (ret != 0) {
-            std::cerr << "error processing buffer" << std::endl;
-            return 1;
+                if (!data.empty()) {
+                    HttpRequest req;
+                    if (0 == process_buffer(data.c_str(), &req)) {
+                        process_request(&req, events[n].data.fd);
+                    }
+                }
+                
+                // Close the connection after processing
+                epoll_ctl(epoll_fd, EPOLL_CTL_DEL, events[n].data.fd, nullptr);
+                close(events[n].data.fd);
+            }
         }
-
-        if (0 != process_request(&req, new_socket)) {
-            std::cerr << "error sending the response" << std::endl;
-            return 1;
-        }
-
-        close(new_socket);
     }
 
+    close(epoll_fd);
     return 0;
 }
