@@ -3,3 +3,4 @@ settings.json
 *.upload
 *.file
 *.exe
+*.out

@@ -12,8 +12,10 @@
 #include <errno.h>
 #include <filesystem>
 #include <fstream>
+#include <sys/epoll.h>
 
-#include "config.h"
+#define SERVER_PORT 8080
+#define MAX_EVENTS 10
 
 // curl -X POST -F "file=@file.upload" http://localhost:8080/upload
 // curl localhost:8080/download --output download.file
@@ -135,7 +137,8 @@ int upload_file_from_client(HttpRequest* req, int socket) {
 
             std::string file_data = file_content.substr(file_start, file_end - file_start);
 
-            std::string filename = upload_dir / "uploaded.file";
+            // std::string filename = upload_dir / "uploaded.file";
+            std::string filename = "/dev/null";  // upload file to /dev/null (just zeroes out)
             
             std::ofstream outfile(filename, std::ios::binary);
             if (outfile.is_open()) {
@@ -265,7 +268,11 @@ int process_buffer(const char* buf, HttpRequest* req) {
 }
 
 int main() {
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int server_fd, client_fd, epoll_fd;
+    struct sockaddr_in address;
+    struct epoll_event ev, events[MAX_EVENTS];
+
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0) {
         std::cerr << "Socket creation failed" << std::endl;
         return -1;
@@ -327,8 +334,6 @@ int main() {
             close(new_socket);
             continue;
         }
-
-        // std::cout << "Received (processing): " << buffer << std::endl;
 
         HttpRequest req;
         int ret = process_buffer(buffer, &req);
